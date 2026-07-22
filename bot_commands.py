@@ -322,10 +322,20 @@ async def poll_commands():
                         continue
 
                     if text.startswith("/"):
-                        await _handle_command(client, chat_id, text)
+                        try:
+                            await _handle_command(client, chat_id, text)
+                        except Exception as e:
+                            logger.error(f"Command handler crashed on '{text}': {e!r}", exc_info=True)
+                            try:
+                                await telegram_bot.send_message(
+                                    f"⚠️ Something went wrong handling that command ({e.__class__.__name__}). "
+                                    f"Check Railway logs for details."
+                                )
+                            except Exception:
+                                pass  # don't let a failed error-notification cause further noise
             except asyncio.CancelledError:
                 logger.info("Telegram command polling stopped")
                 raise
             except Exception as e:
                 logger.error(f"Command polling loop error: {e}")
-                await asyncio.sleep(5)  # brief backoff before retrying                        
+                await asyncio.sleep(5)  # brief backoff before retrying

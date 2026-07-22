@@ -26,7 +26,7 @@ import runtime_settings
 from deriv_client import client as deriv_client, calc_binary_pnl
 from market_data import build_all_contexts
 from signal_engine import collect_all_votes
-from consensus import build_consensus, rank_and_select
+from consensus import build_consensus, rank_and_select, build_independent_signals, rank_and_select_independent
 from models import TradeRecord, ConsensusSignal
 
 logger = logging.getLogger(__name__)
@@ -116,9 +116,14 @@ async def run_cycle():
         await telegram_bot.send_message(telegram_bot.format_error("signal_engine", str(e)))
         return
 
-    # 3. Consensus + ranking
-    consensus_signals = build_consensus(votes)
-    qualifying = [s for s in consensus_signals if s.qualifies]
+    # 3. Consensus/selection — branches on the current trading mode
+    mode = runtime_settings.trading_mode
+    if mode == "independent":
+        candidate_signals = build_independent_signals(votes)
+        qualifying = candidate_signals  # every candidate already cleared MIN_CONFIDENCE upstream
+    else:
+        consensus_signals = build_consensus(votes)
+        qualifying = [s for s in consensus_signals if s.qualifies]
 
     # Filter out instruments whose market is currently closed BEFORE ranking,
     # so a closed forex pair doesn't waste a trade slot — the next-best
@@ -133,9 +138,12 @@ async def run_cycle():
         except Exception as e:
             logger.warning(f"Could not check market status for {s.symbol}, excluding to be safe: {e}")
 
-    selected = rank_and_select(tradeable_qualifying, num_signals=runtime_settings.num_signals)
+    if mode == "independent":
+        selected = rank_and_select_independent(tradeable_qualifying, num_signals=runtime_settings.num_signals)
+    else:
+        selected = rank_and_select(tradeable_qualifying, num_signals=runtime_settings.num_signals)
 
-    await telegram_bot.send_message(telegram_bot.format_cycle_summary(selected, len(qualifying)))
+    await telegram_bot.send_message(telegram_bot.format_cycle_summary(selected, len(qualifying), mode=mode))
 
     if not selected:
         logger.info("No tradeable signals selected this cycle (either none qualified, or all qualifying markets were closed).")

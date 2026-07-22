@@ -33,6 +33,12 @@ logger = logging.getLogger(__name__)
 # that's proof the container silently restarted (crash-looped) on its own.
 PROCESS_STARTED_AT = datetime.utcnow()
 
+# Tracks chat_ids that have sent /setmode independent once and are awaiting
+# a second confirmation — simple in-memory guard against fat-fingering into
+# the higher-risk mode. Resets on process restart (acceptable: worst case
+# they just confirm again, no safety implication either way).
+_pending_independent_confirm: dict = {}
+
 # Shared pause flag — checked by trading_engine.run_cycle().
 # Module-level and process-local: if the bot restarts, it resumes un-paused
 # (Railway doesn't persist this across deploys, only within one running process).
@@ -74,6 +80,7 @@ def _format_status() -> str:
         f"Process uptime: {uptime_str} (started {PROCESS_STARTED_AT.strftime('%Y-%m-%d %H:%M UTC')})",
         f"Stake per trade: ${runtime_settings.stake_per_trade:.2f} | Signals per cycle: {runtime_settings.num_signals}",
         f"Min confidence: {runtime_settings.min_confidence}% | Trade duration: {runtime_settings.trade_duration_minutes}min",
+        f"Trading mode: {runtime_settings.trading_mode}",
         "",
         f"Open positions: {len(open_trades)}",
     ]
@@ -118,6 +125,7 @@ def _help_text() -> str:
         "/setsignals &lt;count&gt; — change signals traded per cycle (e.g. /setsignals 3)\n"
         "/setconfidence &lt;1-100&gt; — change minimum model confidence (e.g. /setconfidence 65)\n"
         "/setduration &lt;minutes&gt; — change new trades' duration (e.g. /setduration 30)\n"
+        "/setmode &lt;consensus|independent&gt; — switch trading strategy\n"
         "/help — show this message"
     )
 
@@ -228,6 +236,27 @@ async def _handle_command(client: httpx.AsyncClient, chat_id: str, text: str):
             )
         except ValueError:
             await telegram_bot.send_message("Couldn't parse that. Usage: /setduration 60 (minutes, 1-1440)")
+    elif command == "/setmode":
+        if not args or args[0].lower() not in ("consensus", "independent"):
+            await telegram_bot.send_message(
+                f"Current mode: {runtime_settings.trading_mode}\n"
+                "Usage: /setmode consensus  — require 2+/3 models to agree before trading (safer, fewer trades)\n"
+                "/setmode independent — trade any single model's high-confidence call on its own "
+                "(more trades, no cross-model validation, higher risk)"
+            )
+            return
+        value = args[0].lower()
+        if value == "independent" and runtime_settings.trading_mode != "independent" and not _pending_independent_confirm.get(chat_id):
+            _pending_independent_confirm[chat_id] = True
+            await telegram_bot.send_message(
+                "⚠️ Independent mode trades on a SINGLE model's opinion with no agreement check from "
+                "the other two models. This is meaningfully higher risk than consensus mode. "
+                "Send /setmode independent again to confirm."
+            )
+            return
+        _pending_independent_confirm.pop(chat_id, None)
+        runtime_settings.set_trading_mode(value)
+        await telegram_bot.send_message(f"✅ Trading mode set to: {value} (takes effect next cycle).")
     elif command == "/start" or command == "/help":
         await telegram_bot.send_message(_help_text())
     elif command == "/balance":
@@ -250,12 +279,14 @@ async def _handle_command(client: httpx.AsyncClient, chat_id: str, text: str):
             f"Stake per trade: ${runtime_settings.stake_per_trade:.2f}\n"
             f"Signals per cycle: {runtime_settings.num_signals}\n"
             f"Min confidence: {runtime_settings.min_confidence}%\n"
-            f"Contract duration: {runtime_settings.trade_duration_minutes}min\n\n"
+            f"Contract duration: {runtime_settings.trade_duration_minutes}min\n"
+            f"Trading mode: {runtime_settings.trading_mode}\n\n"
             "To change any of these, use:\n"
             "/setstake &lt;amount&gt;\n"
             "/setsignals &lt;count&gt;\n"
             "/setconfidence &lt;1-100&gt;\n"
-            "/setduration &lt;minutes&gt;"
+            "/setduration &lt;minutes&gt;\n"
+            "/setmode &lt;consensus|independent&gt;"
         )
     # Unrecognized text is silently ignored — no need to spam replies to
     # random messages sent to the bot.
@@ -297,4 +328,4 @@ async def poll_commands():
                 raise
             except Exception as e:
                 logger.error(f"Command polling loop error: {e}")
-                await asyncio.sleep(5)  # brief backoff before retrying
+                await asyncio.sleep(5)  # brief backoff before retrying                        

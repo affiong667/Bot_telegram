@@ -22,6 +22,7 @@ stake_per_trade: float = config.STAKE_PER_TRADE
 num_signals: int = config.NUM_SIGNALS
 min_confidence: int = config.MIN_CONFIDENCE
 trade_duration_minutes: int = config.TRADE_DURATION_MINUTES
+trading_mode: str = "consensus"  # "consensus" (require 2+/3 model agreement) or "independent" (any single model's high-confidence vote is tradeable on its own)
 
 
 def set_stake(value: float):
@@ -50,9 +51,15 @@ def set_trade_duration(value: int):
     trade_duration_minutes = value
 
 
+def set_trading_mode(value: str):
+    global trading_mode
+    trading_mode = value
+
+
 def reset_to_defaults():
-    global stake_per_trade, num_signals, min_confidence, trade_duration_minutes
+    global stake_per_trade, num_signals, min_confidence, trade_duration_minutes, trading_mode
     stake_per_trade = config.STAKE_PER_TRADE
     num_signals = config.NUM_SIGNALS
     min_confidence = config.MIN_CONFIDENCE
     trade_duration_minutes = config.TRADE_DURATION_MINUTES
+    trading_mode = "consensus"

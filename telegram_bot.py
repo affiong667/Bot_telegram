@@ -40,21 +40,33 @@ def _label(symbol: str) -> str:
     return config.INSTRUMENT_LABELS.get(symbol, symbol)
 
 
-def format_cycle_summary(selected: List[ConsensusSignal], all_qualifying: int) -> str:
+def format_cycle_summary(selected: List[ConsensusSignal], all_qualifying: int, mode: str = "consensus") -> str:
+    import runtime_settings  # local import to avoid a module load-order dependency at import time
+    mode_label = "Independent (any single model)" if mode == "independent" else "Consensus (2+/3 model agreement)"
+
     if not selected:
         return (
             "⏱️ <b>Hourly cycle</b>\n"
-            "No qualifying signals this hour (no instrument reached "
-            f"{config.MIN_MODELS_AGREE}+ model agreement at {config.MIN_CONFIDENCE}%+ confidence)."
+            f"Mode: {mode_label}\n"
+            f"No qualifying signals this hour at {runtime_settings.min_confidence}%+ confidence."
         )
-    lines = [f"⏱️ <b>Hourly cycle</b> — {len(selected)} signal(s) selected ({all_qualifying} qualified total)\n"]
+    lines = [
+        f"⏱️ <b>Hourly cycle</b> — {len(selected)} signal(s) selected ({all_qualifying} qualified total)\n"
+        f"Mode: {mode_label}\n"
+    ]
     for s in selected:
         arrow = "🟢" if s.direction.value == "bullish" else "🔴"
         models = "/".join(m.upper() for m in s.agreeing_models)
-        lines.append(
-            f"{arrow} <b>{_label(s.symbol)}</b> {s.direction.value.upper()} "
-            f"— {models} ({len(s.agreeing_models)}/3) — avg conf {s.avg_confidence:.0f}%"
-        )
+        if mode == "independent":
+            lines.append(
+                f"{arrow} <b>{_label(s.symbol)}</b> {s.direction.value.upper()} "
+                f"— {models} — avg conf {s.avg_confidence:.0f}%"
+            )
+        else:
+            lines.append(
+                f"{arrow} <b>{_label(s.symbol)}</b> {s.direction.value.upper()} "
+                f"— {models} ({len(s.agreeing_models)}/3) — avg conf {s.avg_confidence:.0f}%"
+            )
     return "\n".join(lines)
 
 

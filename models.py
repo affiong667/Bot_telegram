@@ -37,9 +37,12 @@ class InstrumentContext:
     last_price: Optional[float] = None
     pct_change_lookback: Optional[float] = None  # % change over the candle window
     news: List[NewsItem] = field(default_factory=list)
+    is_market_open: Optional[bool] = None  # None = unknown/not checked, True/False = actually checked against Deriv
 
     def to_prompt_block(self) -> str:
         lines = [f"### {self.label} ({self.symbol})"]
+        if self.is_market_open is not None:
+            lines.append(f"Market status: {'OPEN (tradeable now)' if self.is_market_open else 'CLOSED (not tradeable right now)'}")
         if self.last_price is not None:
             lines.append(f"Last price: {self.last_price}")
         if self.pct_change_lookback is not None:

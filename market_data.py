@@ -121,6 +121,12 @@ async def build_instrument_context(http_client: httpx.AsyncClient, symbol: str) 
 
     news = await _fetch_news(http_client, symbol)
 
+    try:
+        is_open = await deriv_client.is_symbol_open(symbol)
+    except Exception as e:
+        logger.debug(f"Market status check failed for {symbol}, leaving unknown: {e}")
+        is_open = None
+
     return InstrumentContext(
         symbol=symbol,
         label=label,
@@ -128,6 +134,7 @@ async def build_instrument_context(http_client: httpx.AsyncClient, symbol: str) 
         last_price=last_price,
         pct_change_lookback=pct_change,
         news=news,
+        is_market_open=is_open,
     )
 
 

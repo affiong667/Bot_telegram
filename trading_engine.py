@@ -46,7 +46,6 @@ def start_scheduler():
     _scheduler.add_job(
         run_cycle,
         trigger=IntervalTrigger(minutes=runtime_settings.trade_duration_minutes),
-        next_run_time=None,
         id=_CYCLE_JOB_ID,
         max_instances=1,
         coalesce=True,

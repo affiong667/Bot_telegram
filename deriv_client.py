@@ -39,6 +39,8 @@ class DerivClient:
         self._pending: Dict[int, asyncio.Future] = {}
         self._listener_task: Optional[asyncio.Task] = None
         self.last_error: Optional[str] = None  # most recent buy/proposal error message, for surfacing to Telegram
+        self._active_symbols_cache: Optional[Dict[str, bool]] = None
+        self._active_symbols_cache_time: float = 0.0
         self._authorized = False
 
     async def connect(self):
@@ -133,14 +135,26 @@ class DerivClient:
         return float(prices[-1]) if prices else None
 
     async def is_symbol_open(self, symbol: str) -> bool:
-        resp = await self._send({"active_symbols": "brief", "product_type": "basic"})
-        if resp.get("error"):
-            logger.warning(f"active_symbols check failed: {resp['error'].get('message')}")
-            return True  # fail-open; the proposal call will reject it anyway if truly closed
-        for s in resp.get("active_symbols", []):
-            if s.get("symbol") == symbol:
-                return bool(s.get("exchange_is_open"))
-        return False
+        """
+        Cached for a short window (default 60s) since this is called once per
+        instrument per cycle (up to 50x) but the underlying active_symbols
+        list changes rarely 鈥� one real API call serves the whole cycle
+        instead of one per instrument.
+        """
+        import time
+        now = time.monotonic()
+        if self._active_symbols_cache is None or (now - self._active_symbols_cache_time) > 60:
+            resp = await self._send({"active_symbols": "brief", "product_type": "basic"})
+            if resp.get("error"):
+                logger.warning(f"active_symbols check failed: {resp['error'].get('message')}")
+                return True  # fail-open; the proposal call will reject it anyway if truly closed
+            self._active_symbols_cache = {
+                s.get("symbol"): bool(s.get("exchange_is_open"))
+                for s in resp.get("active_symbols", [])
+            }
+            self._active_symbols_cache_time = now
+
+        return self._active_symbols_cache.get(symbol, False)
 
     # -----------------------------------------------------------------
     # Trading
@@ -194,7 +208,7 @@ class DerivClient:
         return resp.get("balance")
 
 
-# Module-level singleton — one connection shared by the whole bot process.
+# Module-level singleton 鈥� one connection shared by the whole bot process.
 client = DerivClient()
 
 

@@ -82,6 +82,16 @@ INSTRUMENTS: List[str] = [
     "frxNZDCAD", "frxNZDCHF", "frxNZDJPY",
 ]
 
+# Data source split: TwelveData's free tier is rate-limited (~8 req/min), so
+# only the 8 most-major pairs use it as primary source. The remaining 20
+# crosses go straight to Deriv's own feed — this keeps TwelveData usage
+# comfortably under its free-tier limit instead of every instrument racing
+# for the same 8 requests/minute and mostly failing.
+TWELVEDATA_INSTRUMENTS: List[str] = [
+    "frxEURUSD", "frxGBPUSD", "frxUSDJPY", "frxUSDCHF",
+    "frxAUDUSD", "frxUSDCAD", "frxNZDUSD", "frxEURGBP",
+]
+
 # Human-readable labels for prompts/Telegram (falls back to raw symbol if missing)
 INSTRUMENT_LABELS = {
     "frxEURUSD": "EUR/USD", "frxGBPUSD": "GBP/USD", "frxUSDJPY": "USD/JPY",

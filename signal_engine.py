@@ -13,7 +13,7 @@ import asyncio
 import json
 import logging
 import re
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 import httpx
 
@@ -36,16 +36,12 @@ Rules:
   invent data points. If the data for an instrument is marked "unavailable",
   do not include it in your output.
 - PRIORITIZE instruments marked "Market status: OPEN" — these can actually
-  be traded right now. Give real, careful analysis to OPEN synthetic/volatility
-  indices (symbols like R_10, R_100, BOOM500, CRASH500, JD100, stpRNG, etc.)
-  in particular: these trade 24/7 and are often the ONLY tradeable instruments
-  when forex markets are closed, so do not skip or under-analyze them just
-  because they're less familiar than forex pairs. Give them the same level of
-  genuine analytical effort as forex pairs, using their price/candle data.
+  be traded right now. Give real, careful analysis to every OPEN instrument;
+  don't let a handful of familiar pairs crowd out genuine analysis of the
+  others.
 - You may still include CLOSED instruments if you have a genuine high-confidence
-  view (it may still be useful context), but do not let closed forex pairs
-  crowd out real analysis of open synthetic indices — evaluate every OPEN
-  instrument on its own merits first.
+  view (it may still be useful context), but evaluate every OPEN instrument
+  on its own merits first.
 - Only include an instrument in your output if your confidence is {min_confidence} or higher.
 - Confidence is an integer 0-100 reflecting your certainty in the direction.
 - direction must be exactly one of: "bullish", "bearish". Omit instruments you're not confident about — do not output "neutral".
@@ -84,6 +80,32 @@ def _extract_json(text: str) -> Dict[str, Any]:
     return json.loads(text)
 
 
+def _normalize_symbol(raw_symbol: str, valid_symbols: set) -> Optional[str]:
+    """
+    Models sometimes return a slightly different symbol format than the
+    exact Deriv code we asked for (e.g. 'EURUSD' or 'EUR/USD' instead of
+    'frxEURUSD'), even though the prompt explicitly shows the exact string
+    to use. Rather than silently discard those votes, try a few forgiving
+    matches before giving up. Returns the canonical symbol if matched, else
+    None.
+    """
+    raw = raw_symbol.strip()
+    if raw in valid_symbols:
+        return raw
+
+    # Strip common separators/casing differences and compare
+    cleaned = raw.upper().replace("/", "").replace("-", "").replace("_", "")
+    for candidate in valid_symbols:
+        candidate_cleaned = candidate.upper().replace("frx", "").replace("FRX", "")
+        if cleaned == candidate_cleaned or cleaned == candidate.upper():
+            return candidate
+        # Also try matching against the "frxEURUSD" form directly, case-insensitive
+        if cleaned == candidate.upper().replace("/", "").replace("-", "").replace("_", ""):
+            return candidate
+
+    return None
+
+
 def _parse_signals(model_name: str, raw_text: str, valid_symbols: set) -> List[ModelVote]:
     votes: List[ModelVote] = []
     try:
@@ -95,12 +117,14 @@ def _parse_signals(model_name: str, raw_text: str, valid_symbols: set) -> List[M
 
     for sig in signals:
         try:
-            symbol = str(sig["symbol"]).strip()
+            raw_symbol = str(sig["symbol"]).strip()
             direction_raw = str(sig["direction"]).lower().strip()
             confidence = int(sig["confidence"])
             rationale = str(sig.get("rationale", ""))
 
-            if symbol not in valid_symbols:
+            symbol = _normalize_symbol(raw_symbol, valid_symbols)
+            if symbol is None:
+                logger.warning(f"[{model_name}] symbol '{raw_symbol}' didn't match any known instrument — skipping vote")
                 continue
             if direction_raw not in ("bullish", "bearish"):
                 continue

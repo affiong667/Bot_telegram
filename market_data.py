@@ -3,16 +3,16 @@ Fetches real market data to ground the AI models' signals — this is what
 makes the prompts based on actual price action/news rather than pure
 model imagination.
 
-Price data: Deriv's own tick/candle history is always available (no extra
-key). If TWELVEDATA_API_KEY is set, we additionally cross-check with an
-independent source for forex instruments (Deriv is itself a broker/market
-maker, so an independent price feed is a useful sanity check — divergence
-can indicate a data issue).
+Price data: TwelveData is now the PRIMARY source for candles/price (the
+instrument universe is forex-only, which TwelveData covers well on its
+free tier). Deriv's own tick/candle history is used only as a FALLBACK if
+TwelveData fails or isn't configured — this reduces how often the bot
+depends on Deriv's WebSocket connection just to gather prompt context;
+Deriv's WebSocket is still required (and always used) for the parts that
+can only happen there: contract proposals, buying, and settlement checks.
 
 News data: NewsData.io free tier, queried per forex pair's base/quote
-currency. Synthetic/volatility indices are Deriv-internal random-walk
-instruments with no real-world news correlate, so news fetch is skipped
-for them (see config.NEWS_RELEVANT_PREFIXES).
+currency.
 """
 
 import asyncio
@@ -22,53 +22,104 @@ from typing import List, Optional
 import httpx
 
 import config
-from models import InstrumentContext, NewsItem
+from models import InstrumentContext, NewsItem, Candle
 from deriv_client import client as deriv_client
 
 logger = logging.getLogger(__name__)
 
-# Maps Deriv forex symbols to (base, quote) currency codes for news queries
+# Maps Deriv forex symbols to (base, quote) currency codes for TwelveData/news queries
 _FX_CURRENCY_MAP = {
     "frxEURUSD": ("EUR", "USD"), "frxGBPUSD": ("GBP", "USD"), "frxUSDJPY": ("USD", "JPY"),
     "frxUSDCHF": ("USD", "CHF"), "frxAUDUSD": ("AUD", "USD"), "frxUSDCAD": ("USD", "CAD"),
     "frxNZDUSD": ("NZD", "USD"), "frxEURGBP": ("EUR", "GBP"), "frxEURJPY": ("EUR", "JPY"),
     "frxGBPJPY": ("GBP", "JPY"), "frxEURAUD": ("EUR", "AUD"), "frxEURCHF": ("EUR", "CHF"),
     "frxAUDJPY": ("AUD", "JPY"), "frxGBPAUD": ("GBP", "AUD"), "frxGBPCAD": ("GBP", "CAD"),
+    "frxAUDCAD": ("AUD", "CAD"), "frxAUDCHF": ("AUD", "CHF"), "frxAUDNZD": ("AUD", "NZD"),
+    "frxCADCHF": ("CAD", "CHF"), "frxCADJPY": ("CAD", "JPY"), "frxCHFJPY": ("CHF", "JPY"),
+    "frxEURCAD": ("EUR", "CAD"), "frxEURNZD": ("EUR", "NZD"), "frxGBPCHF": ("GBP", "CHF"),
+    "frxGBPNZD": ("GBP", "NZD"), "frxNZDCAD": ("NZD", "CAD"), "frxNZDCHF": ("NZD", "CHF"),
+    "frxNZDJPY": ("NZD", "JPY"),
+}
+
+# TwelveData interval string for our configured candle granularity
+_GRANULARITY_TO_TWELVEDATA_INTERVAL = {
+    60: "1min", 300: "5min", 900: "15min", 1800: "30min",
+    3600: "1h", 14400: "4h", 86400: "1day",
 }
 
 
-def _is_news_relevant(symbol: str) -> bool:
-    return symbol.startswith(config.NEWS_RELEVANT_PREFIXES)
+def _twelvedata_interval() -> str:
+    return _GRANULARITY_TO_TWELVEDATA_INTERVAL.get(config.PRICE_CANDLE_GRANULARITY_SEC, "15min")
 
 
-async def _fetch_candles_deriv(symbol: str) -> List:
-    return await deriv_client.get_candles(
-        symbol, config.PRICE_LOOKBACK_CANDLES, config.PRICE_CANDLE_GRANULARITY_SEC
-    )
-
-
-async def _fetch_twelvedata_price(client: httpx.AsyncClient, symbol: str) -> Optional[float]:
-    """Independent cross-check price for forex pairs, if TWELVEDATA_API_KEY is configured."""
+async def _fetch_candles_twelvedata(client: httpx.AsyncClient, symbol: str) -> List[Candle]:
+    """Primary candle source. Returns [] if TwelveData isn't configured or the call fails."""
     if not config.TWELVEDATA_API_KEY or symbol not in _FX_CURRENCY_MAP:
-        return None
+        return []
     base, quote = _FX_CURRENCY_MAP[symbol]
     try:
         resp = await client.get(
-            "https://api.twelvedata.com/price",
-            params={"symbol": f"{base}/{quote}", "apikey": config.TWELVEDATA_API_KEY},
+            "https://api.twelvedata.com/time_series",
+            params={
+                "symbol": f"{base}/{quote}",
+                "interval": _twelvedata_interval(),
+                "outputsize": config.PRICE_LOOKBACK_CANDLES,
+                "apikey": config.TWELVEDATA_API_KEY,
+            },
             timeout=15,
         )
         data = resp.json()
-        if "price" in data:
-            return float(data["price"])
-        logger.debug(f"TwelveData no price for {symbol}: {data}")
+        values = data.get("values")
+        if not values:
+            logger.debug(f"TwelveData no candle data for {symbol}: {data.get('message', data)}")
+            return []
+        # TwelveData returns newest-first; we want oldest-first to match Deriv's ordering
+        values = list(reversed(values))
+        candles = []
+        for v in values:
+            try:
+                candles.append(Candle(
+                    epoch=0,  # TwelveData gives a datetime string, not epoch; not needed downstream
+                    open=float(v["open"]), high=float(v["high"]),
+                    low=float(v["low"]), close=float(v["close"]),
+                ))
+            except (KeyError, ValueError):
+                continue
+        return candles
     except Exception as e:
-        logger.debug(f"TwelveData fetch failed for {symbol}: {e}")
-    return None
+        logger.debug(f"TwelveData candle fetch failed for {symbol}: {e}")
+        return []
+
+
+async def _fetch_candles_deriv_fallback(symbol: str) -> List[Candle]:
+    """
+    Fallback only — used when TwelveData is unavailable/unconfigured/fails.
+    Deriv's WebSocket is expected to drop periodically per Deriv's own docs
+    ("connections can be expected to be interrupted several times a day"),
+    so one retry after a brief wait gives the client's reconnect logic a
+    chance to self-heal before giving up on this instrument for the cycle.
+    """
+    try:
+        candles = await deriv_client.get_candles(
+            symbol, config.PRICE_LOOKBACK_CANDLES, config.PRICE_CANDLE_GRANULARITY_SEC
+        )
+        if candles:
+            return candles
+    except Exception as e:
+        logger.debug(f"Deriv fallback candle fetch failed for {symbol}, will retry once: {e}")
+
+    await asyncio.sleep(3)
+    try:
+        return await deriv_client.get_candles(
+            symbol, config.PRICE_LOOKBACK_CANDLES, config.PRICE_CANDLE_GRANULARITY_SEC
+        )
+    except Exception as e:
+        logger.warning(f"Deriv fallback candle fetch failed for {symbol} even after retry: {e}")
+        return []
 
 
 async def _fetch_news(client: httpx.AsyncClient, symbol: str) -> List[NewsItem]:
-    if not config.NEWSDATA_API_KEY or not _is_news_relevant(symbol):
+    if not config.NEWSDATA_API_KEY:
         return []
     base, quote = _FX_CURRENCY_MAP.get(symbol, (None, None))
     if not base:
@@ -99,25 +150,24 @@ async def _fetch_news(client: httpx.AsyncClient, symbol: str) -> List[NewsItem]:
 async def build_instrument_context(http_client: httpx.AsyncClient, symbol: str) -> InstrumentContext:
     label = config.INSTRUMENT_LABELS.get(symbol, symbol)
 
-    candles = await _fetch_candles_deriv(symbol)
-    last_price = candles[-1].close if candles else await deriv_client.get_last_price(symbol)
+    # Primary: TwelveData. Fallback: Deriv (only touched if TwelveData fails).
+    candles = await _fetch_candles_twelvedata(http_client, symbol)
+    source = "twelvedata"
+    if not candles:
+        candles = await _fetch_candles_deriv_fallback(symbol)
+        source = "deriv_fallback" if candles else "none"
+
+    last_price = candles[-1].close if candles else None
+    if last_price is None:
+        # Last resort: a direct Deriv tick, only if both candle sources failed
+        try:
+            last_price = await deriv_client.get_last_price(symbol)
+        except Exception:
+            last_price = None
 
     pct_change = None
     if len(candles) >= 2 and candles[0].close:
         pct_change = (candles[-1].close - candles[0].close) / candles[0].close * 100
-
-    # Independent cross-check (logged only, not injected into the prompt to
-    # avoid confusing the model with two slightly different numbers —
-    # but a large divergence is worth knowing about operationally).
-    if last_price is not None:
-        cross_check = await _fetch_twelvedata_price(http_client, symbol)
-        if cross_check is not None and last_price:
-            divergence_pct = abs(cross_check - last_price) / last_price * 100
-            if divergence_pct > 0.5:
-                logger.warning(
-                    f"{symbol}: Deriv price {last_price} vs TwelveData {cross_check} "
-                    f"diverge by {divergence_pct:.2f}%"
-                )
 
     news = await _fetch_news(http_client, symbol)
 
@@ -126,6 +176,9 @@ async def build_instrument_context(http_client: httpx.AsyncClient, symbol: str) 
     except Exception as e:
         logger.debug(f"Market status check failed for {symbol}, leaving unknown: {e}")
         is_open = None
+
+    if source == "deriv_fallback":
+        logger.info(f"{symbol}: used Deriv fallback for price data (TwelveData unavailable this cycle)")
 
     return InstrumentContext(
         symbol=symbol,

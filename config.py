@@ -65,24 +65,21 @@ CONTRACT_TYPE_BULLISH = "CALL"
 CONTRACT_TYPE_BEARISH = "PUT"
 
 # ---------------------------------------------------------------------------
-# Instrument universe (~50 symbols — Deriv symbol codes)
-# Forex majors/crosses + Deriv synthetic indices, both tradeable 24/7.
+# Instrument universe (28 forex majors/crosses — Deriv symbol codes)
+# Synthetic/volatility indices removed: they require Deriv's own price feed
+# (no external data provider has them), and pairing them with TwelveData as
+# primary source added complexity for instruments that were also the ones
+# most often missing from qualifying signals anyway. Trade execution and
+# settlement still go through Deriv regardless — this only changes where
+# PRICE DATA for the AI prompts comes from.
 # ---------------------------------------------------------------------------
 INSTRUMENTS: List[str] = [
-    # Forex majors + crosses (Deriv symbol format)
     "frxEURUSD", "frxGBPUSD", "frxUSDJPY", "frxUSDCHF", "frxAUDUSD",
     "frxUSDCAD", "frxNZDUSD", "frxEURGBP", "frxEURJPY", "frxGBPJPY",
     "frxEURAUD", "frxEURCHF", "frxAUDJPY", "frxGBPAUD", "frxGBPCAD",
     "frxAUDCAD", "frxAUDCHF", "frxAUDNZD", "frxCADCHF", "frxCADJPY",
     "frxCHFJPY", "frxEURCAD", "frxEURNZD", "frxGBPCHF", "frxGBPNZD",
     "frxNZDCAD", "frxNZDCHF", "frxNZDJPY",
-    # Deriv synthetic / volatility indices (always open, no market-hours gating needed)
-    "R_10", "R_25", "R_50", "R_75", "R_100",
-    "1HZ10V", "1HZ25V", "1HZ50V", "1HZ75V", "1HZ100V",
-    "BOOM300N", "BOOM500", "BOOM1000",
-    "CRASH300N", "CRASH500", "CRASH1000",
-    "JD10", "JD25", "JD50", "JD75", "JD100",
-    "stpRNG",
 ]
 
 # Human-readable labels for prompts/Telegram (falls back to raw symbol if missing)
@@ -97,23 +94,11 @@ INSTRUMENT_LABELS = {
     "frxEURCAD": "EUR/CAD", "frxEURNZD": "EUR/NZD", "frxGBPCHF": "GBP/CHF",
     "frxGBPNZD": "GBP/NZD", "frxNZDCAD": "NZD/CAD", "frxNZDCHF": "NZD/CHF",
     "frxNZDJPY": "NZD/JPY",
-    "R_10": "Volatility 10 Index", "R_25": "Volatility 25 Index",
-    "R_50": "Volatility 50 Index", "R_75": "Volatility 75 Index",
-    "R_100": "Volatility 100 Index",
-    "1HZ10V": "Volatility 10 (1s) Index", "1HZ25V": "Volatility 25 (1s) Index",
-    "1HZ50V": "Volatility 50 (1s) Index", "1HZ75V": "Volatility 75 (1s) Index",
-    "1HZ100V": "Volatility 100 (1s) Index",
-    "BOOM300N": "Boom 300 Index", "BOOM500": "Boom 500 Index",
-    "BOOM1000": "Boom 1000 Index",
-    "CRASH300N": "Crash 300 Index", "CRASH500": "Crash 500 Index",
-    "CRASH1000": "Crash 1000 Index",
-    "JD10": "Jump 10 Index", "JD25": "Jump 25 Index", "JD50": "Jump 50 Index",
-    "JD75": "Jump 75 Index", "JD100": "Jump 100 Index",
-    "stpRNG": "Step Index",
 }
 
-# Which instruments are real-world assets with news relevance (forex) vs
-# purely synthetic (no real-world news applies — skip news fetch for these).
+# All instruments in the universe are now forex, so news relevance applies
+# to everything (kept as a constant in case non-forex instruments are added
+# back later).
 NEWS_RELEVANT_PREFIXES = ("frx",)
 
 # ---------------------------------------------------------------------------

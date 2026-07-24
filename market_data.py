@@ -53,9 +53,18 @@ def _twelvedata_interval() -> str:
 
 
 async def _fetch_candles_twelvedata(client: httpx.AsyncClient, symbol: str) -> List[Candle]:
-    """Primary candle source. Returns [] if TwelveData isn't configured or the call fails."""
+    """Primary candle source for the designated major pairs only (see
+    config.TWELVEDATA_INSTRUMENTS). Returns [] if unconfigured or the call fails."""
     if not config.TWELVEDATA_API_KEY or symbol not in _FX_CURRENCY_MAP:
         return []
+
+    # Small stagger based on position in the TwelveData list so all 8 calls
+    # don't fire in the same instant — free-tier limits are often enforced
+    # with burst protection, not just a clean per-minute average.
+    if symbol in config.TWELVEDATA_INSTRUMENTS:
+        position = config.TWELVEDATA_INSTRUMENTS.index(symbol)
+        await asyncio.sleep(position * 0.5)
+
     base, quote = _FX_CURRENCY_MAP[symbol]
     try:
         resp = await client.get(
@@ -150,12 +159,20 @@ async def _fetch_news(client: httpx.AsyncClient, symbol: str) -> List[NewsItem]:
 async def build_instrument_context(http_client: httpx.AsyncClient, symbol: str) -> InstrumentContext:
     label = config.INSTRUMENT_LABELS.get(symbol, symbol)
 
-    # Primary: TwelveData. Fallback: Deriv (only touched if TwelveData fails).
-    candles = await _fetch_candles_twelvedata(http_client, symbol)
-    source = "twelvedata"
-    if not candles:
+    # Only the designated major pairs use TwelveData (keeps free-tier rate
+    # limit usage well under its cap); everything else goes straight to
+    # Deriv's own feed as primary, with no need to try TwelveData first.
+    use_twelvedata = symbol in config.TWELVEDATA_INSTRUMENTS
+
+    if use_twelvedata:
+        candles = await _fetch_candles_twelvedata(http_client, symbol)
+        source = "twelvedata"
+        if not candles:
+            candles = await _fetch_candles_deriv_fallback(symbol)
+            source = "deriv_fallback" if candles else "none"
+    else:
         candles = await _fetch_candles_deriv_fallback(symbol)
-        source = "deriv_fallback" if candles else "none"
+        source = "deriv" if candles else "none"
 
     last_price = candles[-1].close if candles else None
     if last_price is None:

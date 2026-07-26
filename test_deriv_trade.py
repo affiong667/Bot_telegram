@@ -86,6 +86,24 @@ async def main():
         print("   You need a CR (real) or VRTC (demo) trading account instead.")
         print("   Continuing anyway to see what Deriv itself says...")
 
+    print(f"\nChecking what Deriv actually allows for {TEST_SYMBOL} on your account...")
+    contracts_resp = await send(ws, {"contracts_for": TEST_SYMBOL, "currency": "USD"})
+    if contracts_resp.get("error"):
+        print(f"   Could not fetch contract offerings: {contracts_resp['error'].get('message')}")
+    else:
+        available = contracts_resp.get("contracts_for", {}).get("available", [])
+        rise_fall = [c for c in available if c.get("contract_category") == "callput"]
+        if rise_fall:
+            print(f"   Found {len(rise_fall)} Rise/Fall (callput) offering(s) for {TEST_SYMBOL}:")
+            for c in rise_fall[:5]:
+                print(f"     - min duration: {c.get('min_contract_duration')}, "
+                      f"max duration: {c.get('max_contract_duration')}, "
+                      f"barrier category: {c.get('barrier_category')}")
+        else:
+            categories = sorted(set(c.get("contract_category") for c in available))
+            print(f"   No Rise/Fall (callput) offerings found for {TEST_SYMBOL} on this account.")
+            print(f"   Available contract categories instead: {categories}")
+
     print(f"\nRequesting a price proposal for {TEST_SYMBOL} CALL, "
           f"${TEST_STAKE} stake, {TEST_DURATION_SEC}s duration...")
     proposal_resp = await send(ws, {

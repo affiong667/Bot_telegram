@@ -104,6 +104,32 @@ async def main():
             print(f"   No Rise/Fall (callput) offerings found for {TEST_SYMBOL} on this account.")
             print(f"   Available contract categories instead: {categories}")
 
+    # Broader sweep: check a handful of common symbols across categories to
+    # find out what this specific account CAN actually trade, since the
+    # answer above was "nothing" for frxEURUSD Rise/Fall specifically.
+    print(f"\nSweeping other common symbols to find what THIS account can trade...")
+    candidates = ["frxEURUSD", "frxGBPUSD", "frxUSDJPY", "R_100", "R_50", "1HZ100V", "BOOM500", "CRASH500"]
+    any_found = False
+    for sym in candidates:
+        resp = await send(ws, {"contracts_for": sym, "currency": "USD"})
+        if resp.get("error"):
+            print(f"   {sym}: error fetching offerings ({resp['error'].get('message')})")
+            continue
+        available = resp.get("contracts_for", {}).get("available", [])
+        rise_fall = [c for c in available if c.get("contract_category") == "callput"]
+        if rise_fall:
+            durations = f"{rise_fall[0].get('min_contract_duration')} to {rise_fall[0].get('max_contract_duration')}"
+            print(f"   ✅ {sym}: {len(rise_fall)} Rise/Fall offering(s) available, duration range {durations}")
+            any_found = True
+        else:
+            print(f"   ❌ {sym}: no Rise/Fall offerings")
+
+    if not any_found:
+        print(f"\n⚠️  NONE of the tested symbols have Rise/Fall offerings on this account.")
+        print(f"   This strongly suggests binary/digital options are not enabled for this")
+        print(f"   account's region/license at all. Check Deriv's app for what asset")
+        print(f"   classes actually show a 'Rise/Fall' or 'Up/Down' trade type option.")
+
     print(f"\nRequesting a price proposal for {TEST_SYMBOL} CALL, "
           f"${TEST_STAKE} stake, {TEST_DURATION_SEC}s duration...")
     proposal_resp = await send(ws, {

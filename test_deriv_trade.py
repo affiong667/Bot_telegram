@@ -78,6 +78,7 @@ async def main():
     print(f"✅ Authorized.")
     print(f"   Account: {loginid}")
     print(f"   Type: {'DEMO/Virtual' if is_virtual else 'REAL MONEY'}")
+    print(f"   Landing company (from authorize): {account.get('landing_company_name', 'unknown')}")
     print(f"   Balance: {balance} {currency}")
 
     if loginid.startswith("CRW") or loginid.startswith("VRW"):
@@ -85,6 +86,15 @@ async def main():
         print("   like a WALLET account. Wallet accounts CANNOT trade via the API.")
         print("   You need a CR (real) or VRTC (demo) trading account instead.")
         print("   Continuing anyway to see what Deriv itself says...")
+
+    print(f"\nChecking your account's landing company (regulatory entity)...")
+    lc_resp = await send(ws, {"landing_company_details": account.get("landing_company_name", "")})
+    if lc_resp.get("error"):
+        print(f"   Could not fetch landing company details: {lc_resp['error'].get('message')}")
+    else:
+        details = lc_resp.get("landing_company_details", {})
+        print(f"   Landing company: {details.get('name')} ({details.get('shortcode')})")
+        print(f"   Country: {details.get('country')}")
 
     print(f"\nChecking what Deriv actually allows for {TEST_SYMBOL} on your account...")
     contracts_resp = await send(ws, {"contracts_for": TEST_SYMBOL, "currency": "USD"})

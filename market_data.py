@@ -22,6 +22,7 @@ from typing import List, Optional
 import httpx
 
 import config
+import broker
 from models import InstrumentContext, NewsItem, Candle
 from deriv_client import client as deriv_client
 
@@ -157,28 +158,38 @@ async def _fetch_news(client: httpx.AsyncClient, symbol: str) -> List[NewsItem]:
 
 
 async def build_instrument_context(http_client: httpx.AsyncClient, symbol: str) -> InstrumentContext:
-    label = config.INSTRUMENT_LABELS.get(symbol, symbol)
+    label = broker.get_label(symbol)
 
-    # Only the designated major pairs use TwelveData (keeps free-tier rate
-    # limit usage well under its cap); everything else goes straight to
-    # Deriv's own feed as primary, with no need to try TwelveData first.
-    use_twelvedata = symbol in config.TWELVEDATA_INSTRUMENTS
-
-    if use_twelvedata:
-        candles = await _fetch_candles_twelvedata(http_client, symbol)
-        source = "twelvedata"
-        if not candles:
-            candles = await _fetch_candles_deriv_fallback(symbol)
-            source = "deriv_fallback" if candles else "none"
+    if config.BROKER == "pocket_option":
+        # Pocket Option OTC symbols don't map onto TwelveData's forex feed
+        # (different symbol format, and OTC synthetic pricing isn't real
+        # market forex data anyway) — fetch candles straight from Pocket
+        # Option itself, matching how trades will actually be priced there.
+        candles = await broker.get_candles(symbol, config.PRICE_LOOKBACK_CANDLES, config.PRICE_CANDLE_GRANULARITY_SEC)
+        source = "pocket_option" if candles else "none"
+        news = []  # OTC synthetic instruments have no real-world news correlate
     else:
-        candles = await _fetch_candles_deriv_fallback(symbol)
-        source = "deriv" if candles else "none"
+        # Only the designated major pairs use TwelveData (keeps free-tier rate
+        # limit usage well under its cap); everything else goes straight to
+        # Deriv's own feed as primary, with no need to try TwelveData first.
+        use_twelvedata = symbol in config.TWELVEDATA_INSTRUMENTS
+        if use_twelvedata:
+            candles = await _fetch_candles_twelvedata(http_client, symbol)
+            source = "twelvedata"
+            if not candles:
+                candles = await _fetch_candles_deriv_fallback(symbol)
+                source = "deriv_fallback" if candles else "none"
+        else:
+            candles = await _fetch_candles_deriv_fallback(symbol)
+            source = "deriv" if candles else "none"
+        news = await _fetch_news(http_client, symbol)
 
     last_price = candles[-1].close if candles else None
     if last_price is None:
-        # Last resort: a direct Deriv tick, only if both candle sources failed
+        # Last resort: a direct broker tick, only if candle sources failed
         try:
-            last_price = await deriv_client.get_last_price(symbol)
+            last_price = await broker.get_candles(symbol, 1, config.PRICE_CANDLE_GRANULARITY_SEC)
+            last_price = last_price[-1].close if last_price else None
         except Exception:
             last_price = None
 
@@ -186,10 +197,8 @@ async def build_instrument_context(http_client: httpx.AsyncClient, symbol: str) 
     if len(candles) >= 2 and candles[0].close:
         pct_change = (candles[-1].close - candles[0].close) / candles[0].close * 100
 
-    news = await _fetch_news(http_client, symbol)
-
     try:
-        is_open = await deriv_client.is_symbol_open(symbol)
+        is_open = await broker.is_symbol_open(symbol)
     except Exception as e:
         logger.debug(f"Market status check failed for {symbol}, leaving unknown: {e}")
         is_open = None
@@ -210,16 +219,17 @@ async def build_instrument_context(http_client: httpx.AsyncClient, symbol: str) 
 
 async def build_all_contexts() -> List[InstrumentContext]:
     """Fetches price+news context for every instrument in the universe, concurrently."""
+    instruments = broker.get_instruments()
     async with httpx.AsyncClient() as http_client:
-        tasks = [build_instrument_context(http_client, sym) for sym in config.INSTRUMENTS]
+        tasks = [build_instrument_context(http_client, sym) for sym in instruments]
         contexts = await asyncio.gather(*tasks, return_exceptions=True)
 
     results: List[InstrumentContext] = []
-    for sym, ctx in zip(config.INSTRUMENTS, contexts):
+    for sym, ctx in zip(instruments, contexts):
         if isinstance(ctx, Exception):
             logger.error(f"Context build failed for {sym}: {ctx}")
             results.append(InstrumentContext(
-                symbol=sym, label=config.INSTRUMENT_LABELS.get(sym, sym), candles=[]
+                symbol=sym, label=broker.get_label(sym), candles=[]
             ))
         else:
             results.append(ctx)

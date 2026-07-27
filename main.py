@@ -14,7 +14,7 @@ import state
 import telegram_bot
 import bot_commands
 import runtime_settings
-from deriv_client import client as deriv_client
+import broker
 from trading_engine import run_cycle, recover_open_trades, start_scheduler, shutdown_scheduler
 
 logging.basicConfig(
@@ -38,8 +38,8 @@ async def main():
 
     state.init_db()
 
-    logger.info("Connecting to Deriv API...")
-    await deriv_client.connect()
+    logger.info(f"Connecting to broker ({config.BROKER})...")
+    await broker.connect()
 
     await recover_open_trades()
 
@@ -57,13 +57,16 @@ async def main():
 
     polling_task.add_done_callback(_on_polling_task_done)
 
+    instrument_count = len(broker.get_instruments())
+    broker_label = "Pocket Option" if config.BROKER == "pocket_option" else "Deriv"
+    is_demo = config.POCKET_OPTION_IS_DEMO if config.BROKER == "pocket_option" else config.DERIV_IS_DEMO
     await telegram_bot.send_message(
-        "🤖 <b>Binary options consensus bot started</b>\n"
-        f"Universe: {len(config.INSTRUMENTS)} instruments (forex + synthetic indices)\n"
+        "馃 <b>Binary options consensus bot started</b>\n"
+        f"Universe: {instrument_count} instruments\n"
         f"Signals/cycle: {runtime_settings.num_signals} | Stake: ${runtime_settings.stake_per_trade:.2f}\n"
         f"Min confidence: {runtime_settings.min_confidence}% | Contract duration: {runtime_settings.trade_duration_minutes}min\n"
         f"Cycle interval: every {runtime_settings.trade_duration_minutes}min (matches trade duration)\n"
-        f"Broker: Deriv ({'DEMO' if config.DERIV_IS_DEMO else 'REAL ⚠️'})\n"
+        f"Broker: {broker_label} ({'DEMO' if is_demo else 'REAL 鈿狅笍'})\n"
         f"Send /help to see available commands."
     )
 
@@ -79,7 +82,7 @@ async def main():
         logger.info("Shutting down...")
         polling_task.cancel()
         shutdown_scheduler()
-        await deriv_client.close()
+        await broker.close()
 
 
 if __name__ == "__main__":

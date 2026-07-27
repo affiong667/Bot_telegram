@@ -24,7 +24,7 @@ import config
 import state
 import telegram_bot
 import runtime_settings
-from deriv_client import client as deriv_client
+import broker
 
 logger = logging.getLogger(__name__)
 
@@ -260,16 +260,18 @@ async def _handle_command(client: httpx.AsyncClient, chat_id: str, text: str):
     elif command == "/start" or command == "/help":
         await telegram_bot.send_message(_help_text())
     elif command == "/balance":
-        balance = await deriv_client.get_balance()
+        balance = await broker.get_balance()
+        broker_label = "Pocket Option" if config.BROKER == "pocket_option" else "Deriv"
         if balance is None:
-            await telegram_bot.send_message("⚠️ Couldn't fetch balance from Deriv right now — try again shortly.")
+            await telegram_bot.send_message(f"⚠️ Couldn't fetch balance from {broker_label} right now — try again shortly.")
         else:
             amount = balance.get("balance", "n/a")
             currency = balance.get("currency", "")
             loginid = balance.get("loginid", "")
-            account_kind = "DEMO" if config.DERIV_IS_DEMO else "REAL ⚠️"
+            is_demo = config.POCKET_OPTION_IS_DEMO if config.BROKER == "pocket_option" else config.DERIV_IS_DEMO
+            account_kind = "DEMO" if is_demo else "REAL ⚠️"
             await telegram_bot.send_message(
-                f"💰 <b>Deriv Balance</b>\n"
+                f"💰 <b>{broker_label} Balance</b>\n"
                 f"Account: {loginid} ({account_kind})\n"
                 f"Balance: {amount} {currency}"
             )

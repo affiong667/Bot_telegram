@@ -20,6 +20,15 @@ DERIV_API_TOKEN = os.getenv("DERIV_API_TOKEN", "")  # demo account token to star
 DERIV_WS_URL = f"wss://ws.derivws.com/websockets/v3?app_id={DERIV_APP_ID}"
 DERIV_IS_DEMO = os.getenv("DERIV_IS_DEMO", "true").lower() == "true"
 
+# Pocket Option (unofficial, via BinaryOptionsToolsV2). See pocket_option_client.py
+# for setup instructions — requires manually extracting a session ID (ssid)
+# from your browser, which expires periodically and must be refreshed by hand.
+POCKET_OPTION_SSID = os.getenv("POCKET_OPTION_SSID", "")
+POCKET_OPTION_IS_DEMO = os.getenv("POCKET_OPTION_IS_DEMO", "true").lower() == "true"
+
+# Which broker the bot actually trades through: "deriv" or "pocket_option"
+BROKER = os.getenv("BROKER", "deriv").lower()
+
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
@@ -106,6 +115,40 @@ INSTRUMENT_LABELS = {
     "frxNZDJPY": "NZD/JPY",
 }
 
+# Pocket Option OTC (over-the-counter) instrument universe. OTC symbols are
+# Pocket Option's synthetic, always-open equivalents of forex pairs — used
+# instead of the frx* Deriv symbols when BROKER=pocket_option, since Pocket
+# Option's real-market forex symbols follow normal market hours while OTC
+# versions trade 24/7 (helpful for a bot that doesn't want to sit idle
+# whenever forex markets are closed).
+POCKET_OPTION_INSTRUMENTS: List[str] = [
+    "EURUSD_otc", "GBPUSD_otc", "USDJPY_otc", "USDCHF_otc", "AUDUSD_otc",
+    "USDCAD_otc", "NZDUSD_otc", "EURGBP_otc", "EURJPY_otc", "GBPJPY_otc",
+    "EURAUD_otc", "EURCHF_otc", "AUDJPY_otc", "GBPAUD_otc", "GBPCAD_otc",
+    "AUDCAD_otc", "AUDCHF_otc", "AUDNZD_otc", "CADCHF_otc", "CADJPY_otc",
+    "CHFJPY_otc", "EURCAD_otc", "EURNZD_otc", "GBPCHF_otc", "GBPNZD_otc",
+    "NZDCAD_otc", "NZDCHF_otc", "NZDJPY_otc",
+]
+
+POCKET_OPTION_LABELS = {
+    sym: sym.replace("_otc", "").replace("USD", "/USD").replace("GBP", "/GBP")
+    for sym in POCKET_OPTION_INSTRUMENTS
+}
+# Simpler explicit mapping (the auto-generated one above is imprecise for
+# 6-letter pairs); override with clean labels instead:
+POCKET_OPTION_LABELS = {
+    "EURUSD_otc": "EUR/USD (OTC)", "GBPUSD_otc": "GBP/USD (OTC)", "USDJPY_otc": "USD/JPY (OTC)",
+    "USDCHF_otc": "USD/CHF (OTC)", "AUDUSD_otc": "AUD/USD (OTC)", "USDCAD_otc": "USD/CAD (OTC)",
+    "NZDUSD_otc": "NZD/USD (OTC)", "EURGBP_otc": "EUR/GBP (OTC)", "EURJPY_otc": "EUR/JPY (OTC)",
+    "GBPJPY_otc": "GBP/JPY (OTC)", "EURAUD_otc": "EUR/AUD (OTC)", "EURCHF_otc": "EUR/CHF (OTC)",
+    "AUDJPY_otc": "AUD/JPY (OTC)", "GBPAUD_otc": "GBP/AUD (OTC)", "GBPCAD_otc": "GBP/CAD (OTC)",
+    "AUDCAD_otc": "AUD/CAD (OTC)", "AUDCHF_otc": "AUD/CHF (OTC)", "AUDNZD_otc": "AUD/NZD (OTC)",
+    "CADCHF_otc": "CAD/CHF (OTC)", "CADJPY_otc": "CAD/JPY (OTC)", "CHFJPY_otc": "CHF/JPY (OTC)",
+    "EURCAD_otc": "EUR/CAD (OTC)", "EURNZD_otc": "EUR/NZD (OTC)", "GBPCHF_otc": "GBP/CHF (OTC)",
+    "GBPNZD_otc": "GBP/NZD (OTC)", "NZDCAD_otc": "NZD/CAD (OTC)", "NZDCHF_otc": "NZD/CHF (OTC)",
+    "NZDJPY_otc": "NZD/JPY (OTC)",
+}
+
 # All instruments in the universe are now forex, so news relevance applies
 # to everything (kept as a constant in case non-forex instruments are added
 # back later).
@@ -126,8 +169,14 @@ STATE_DB_PATH = os.getenv("STATE_DB_PATH", "/data/state.sqlite3" if os.path.isdi
 def validate() -> List[str]:
     """Returns a list of missing/invalid config problems, empty if OK."""
     problems = []
-    if not DERIV_API_TOKEN:
-        problems.append("Deriv API token missing")
+    if BROKER == "pocket_option":
+        if not POCKET_OPTION_SSID:
+            problems.append(
+                "POCKET_OPTION_SSID missing — see pocket_option_client.get_ssid_instructions()"
+            )
+    else:
+        if not DERIV_API_TOKEN:
+            problems.append("Deriv API token missing")
     if not GROQ_API_KEY:
         problems.append("Groq API key missing")
     if not OPENROUTER_API_KEY:

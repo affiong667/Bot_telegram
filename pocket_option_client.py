@@ -19,7 +19,9 @@ adapted with minimal structural changes if you switch brokers.
 """
 
 import asyncio
+import json
 import logging
+import re
 from typing import Optional, List, Dict, Any
 
 import config
@@ -47,6 +49,46 @@ def get_ssid_instructions() -> str:
     )
 
 
+def normalize_ssid(raw_ssid: str) -> str:
+    """
+    Patch for a real Pocket Option/BinaryOptionsToolsV2 mismatch: the
+    library's sanitize_and_validate_ssid() requires a field literally named
+    'session', but Pocket Option's current site sends the equivalent data
+    under the field name 'sessionToken' instead. Rather than edit the
+    installed library (which gets wiped on every fresh pip install), we
+    transform the payload here before handing it to the library.
+
+    Does this JSON-aware (parses the '42[...]' Socket.IO payload properly)
+    rather than a naive string replace, so we don't risk corrupting the
+    payload if 'sessionToken' appears elsewhere unexpectedly.
+
+    If the payload already has a 'session' field, or doesn't match the
+    expected '42[...]' shape at all, returns it unchanged.
+    """
+    match = re.match(r'^(\d+)(\[.*\])$', raw_ssid.strip())
+    if not match:
+        logger.warning("ssid doesn't match expected '<digits>[...]' Socket.IO shape — passing through unchanged")
+        return raw_ssid
+
+    prefix, json_part = match.group(1), match.group(2)
+    try:
+        parsed = json.loads(json_part)
+    except json.JSONDecodeError as e:
+        logger.warning(f"Could not parse ssid JSON payload ({e}) — passing through unchanged")
+        return raw_ssid
+
+    # Expected shape: ["auth", {"sessionToken": "...", "uid": ..., ...}]
+    if len(parsed) >= 2 and isinstance(parsed[1], dict):
+        payload = parsed[1]
+        if "session" not in payload and "sessionToken" in payload:
+            payload["session"] = payload.pop("sessionToken")
+            logger.info("Normalized ssid: renamed 'sessionToken' field to 'session' for library compatibility")
+            parsed[1] = payload
+            return prefix + json.dumps(parsed)
+
+    return raw_ssid
+
+
 class PocketOptionClient:
     """
     Thin async wrapper matching the shape of deriv_client.DerivClient, so
@@ -67,7 +109,8 @@ class PocketOptionClient:
             raise RuntimeError(
                 "POCKET_OPTION_SSID is not set.\n\n" + get_ssid_instructions()
             )
-        self._client = PocketOptionAsync(ssid=config.POCKET_OPTION_SSID)
+        normalized_ssid = normalize_ssid(config.POCKET_OPTION_SSID)
+        self._client = PocketOptionAsync(ssid=normalized_ssid)
         # Give the underlying WebSocket a moment to establish, matching the
         # library's own documented pattern (they use time.sleep(5) in sync
         # examples; a short async sleep serves the same purpose here).

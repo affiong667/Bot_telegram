@@ -99,6 +99,32 @@ class PocketOptionClient:
         self._client = None
         self.last_error: Optional[str] = None
 
+    async def _call_with_reconnect(self, label: str, fn):
+        """
+        Calls fn() (a zero-arg async callable wrapping a self._client.*
+        call). If it fails with a "not connected" style error, calls the
+        library's own reconnect() once and retries fn() a single time
+        before giving up. The library advertises built-in auto-reconnect,
+        but in practice a request made right as the connection drops can
+        still surface this error before auto-reconnect completes — this
+        gives one explicit, immediate recovery attempt rather than just
+        failing the whole cycle.
+        """
+        try:
+            return await fn()
+        except Exception as e:
+            err_text = str(e)
+            if "not connected" in err_text.lower() or "connection may have dropped" in err_text.lower():
+                logger.warning(f"{label}: connection dropped ({e!r}), attempting reconnect()...")
+                try:
+                    await self._client.reconnect()
+                    await asyncio.sleep(2)  # brief settle time after reconnect
+                    return await fn()
+                except Exception as e2:
+                    logger.error(f"{label}: retry after reconnect() also failed: {e2!r}")
+                    raise
+            raise
+
     async def connect(self):
         if PocketOptionAsync is None:
             raise RuntimeError(
@@ -115,7 +141,21 @@ class PocketOptionClient:
         # library's own documented pattern (they use time.sleep(5) in sync
         # examples; a short async sleep serves the same purpose here).
         await asyncio.sleep(5)
-        logger.info("Connected to Pocket Option")
+
+        # Verify the connection is genuinely ready with a real call, rather
+        # than trusting the fixed sleep alone — retry the connect itself
+        # once if the first real call still reports "not connected".
+        try:
+            await self._client.balance()
+            logger.info("Connected to Pocket Option (verified with balance() call)")
+        except Exception as e:
+            if "not connected" in str(e).lower():
+                logger.warning(f"Initial connection not ready after 5s wait ({e!r}), waiting 5 more seconds and retrying...")
+                await asyncio.sleep(5)
+                await self._client.balance()  # let this raise if still failing — caller (main.py) will see the real error
+                logger.info("Connected to Pocket Option (verified after extended wait)")
+            else:
+                raise
 
         # Diagnostic: log the REAL installed get_candles signature once at
         # startup, since library documentation has proven unreliable for
@@ -175,7 +215,7 @@ class PocketOptionClient:
         last_exception = None
         for label, attempt in attempts:
             try:
-                raw_candles = await attempt()
+                raw_candles = await self._call_with_reconnect(f"get_candles({symbol}, {label})", attempt)
                 logger.info(f"Pocket Option get_candles() succeeded using: {label} — hardcode this shape once confirmed stable")
                 return [
                     Candle(

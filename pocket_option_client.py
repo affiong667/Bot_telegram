@@ -141,9 +141,17 @@ class PocketOptionClient:
         """
         Pocket Option symbols typically use an _otc suffix for
         always-open (over-the-counter) assets, e.g. 'EURUSD_otc'.
+
+        The library's documented signature is get_candles(asset, period, duration)
+        where period = candle size in seconds, duration = total lookback window
+        in seconds (NOT a candle count) — e.g. duration=1200 with period=60 gets
+        ~20 one-minute candles. We convert our (count, granularity_sec) shape
+        into that (period, duration) shape here.
         """
+        period = granularity_sec
+        duration = count * granularity_sec
         try:
-            raw_candles = await self._client.get_candles(symbol, granularity_sec, count)
+            raw_candles = await self._client.get_candles(symbol, period=period, duration=duration)
             return [
                 Candle(
                     epoch=int(c.get("time", 0)),
@@ -153,7 +161,8 @@ class PocketOptionClient:
                 for c in raw_candles
             ]
         except Exception as e:
-            logger.warning(f"Pocket Option candle fetch failed for {symbol}: {e}")
+            logger.warning(f"Pocket Option candle fetch failed for {symbol}: {e!r}")
+            self.last_error = f"{symbol}: {e!r}"
             return []
 
     async def is_symbol_open(self, symbol: str) -> bool:
@@ -178,14 +187,15 @@ class PocketOptionClient:
         Returns {"trade_id": ..., "raw": ...} on success, None on failure.
         """
         try:
-            trade_id, deal = await self._client.buy(symbol, stake, duration_sec) \
-                if direction == "call" else \
-                await self._client.sell(symbol, stake, duration_sec)
+            if direction == "call":
+                trade_id, deal = await self._client.buy(symbol, amount=stake, time=duration_sec)
+            else:
+                trade_id, deal = await self._client.sell(symbol, amount=stake, time=duration_sec)
             self.last_error = None
             return {"trade_id": trade_id, "raw": deal}
         except Exception as e:
-            logger.error(f"Pocket Option buy/sell failed for {symbol}: {e}")
-            self.last_error = str(e)
+            logger.error(f"Pocket Option buy/sell failed for {symbol}: {e!r}")
+            self.last_error = f"{symbol}: {e!r}"
             return None
 
     async def check_result(self, trade_id: str) -> Optional[bool]:

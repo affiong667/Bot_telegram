@@ -99,31 +99,58 @@ class PocketOptionClient:
         self._client = None
         self.last_error: Optional[str] = None
 
+    async def _recreate_client(self):
+        """
+        For structural errors (e.g. 'half closed channel') where the
+        underlying Rust connection manager has torn down its internal
+        message-passing channel, calling reconnect() on the same Python
+        object is unlikely to help — the channel itself is gone, not just
+        the socket. This tears down and rebuilds the whole client instance
+        from scratch instead, which re-runs the full connection setup.
+        """
+        logger.warning("Recreating Pocket Option client from scratch (structural channel error detected)...")
+        try:
+            if self._client is not None:
+                await self._client.disconnect()
+        except Exception as e:
+            logger.debug(f"Error disconnecting old client before recreation (expected if already broken): {e}")
+
+        normalized_ssid = normalize_ssid(config.POCKET_OPTION_SSID)
+        self._client = PocketOptionAsync(ssid=normalized_ssid)
+        await asyncio.sleep(5)
+        await self._client.balance()  # verify the new instance is actually usable; let this raise if not
+        logger.info("Pocket Option client successfully recreated and verified")
+
     async def _call_with_reconnect(self, label: str, fn):
         """
         Calls fn() (a zero-arg async callable wrapping a self._client.*
-        call). If it fails with a "not connected" style error, calls the
-        library's own reconnect() once and retries fn() a single time
-        before giving up. The library advertises built-in auto-reconnect,
-        but in practice a request made right as the connection drops can
-        still surface this error before auto-reconnect completes — this
-        gives one explicit, immediate recovery attempt rather than just
-        failing the whole cycle.
+        call). On failure, picks a recovery strategy based on the error:
+        - "not connected" / "connection may have dropped" -> the socket
+          likely just dropped; try the lighter-weight reconnect() first.
+        - "half closed channel" / "channel sender error" -> the underlying
+          Rust connection manager's internal channel has been torn down;
+          reconnect() on the same instance won't fix this, so recreate the
+          whole client from scratch instead.
+        Retries fn() once after whichever recovery step was taken.
         """
         try:
             return await fn()
         except Exception as e:
-            err_text = str(e)
-            if "not connected" in err_text.lower() or "connection may have dropped" in err_text.lower():
-                logger.warning(f"{label}: connection dropped ({e!r}), attempting reconnect()...")
-                try:
+            err_text = str(e).lower()
+            try:
+                if "half closed channel" in err_text or "channel sender error" in err_text:
+                    logger.warning(f"{label}: structural channel error ({e!r}), recreating client...")
+                    await self._recreate_client()
+                elif "not connected" in err_text or "connection may have dropped" in err_text:
+                    logger.warning(f"{label}: connection dropped ({e!r}), attempting reconnect()...")
                     await self._client.reconnect()
-                    await asyncio.sleep(2)  # brief settle time after reconnect
-                    return await fn()
-                except Exception as e2:
-                    logger.error(f"{label}: retry after reconnect() also failed: {e2!r}")
+                    await asyncio.sleep(2)
+                else:
                     raise
-            raise
+                return await fn()
+            except Exception as e2:
+                logger.error(f"{label}: retry after recovery attempt also failed: {e2!r}")
+                raise
 
     async def connect(self):
         if PocketOptionAsync is None:

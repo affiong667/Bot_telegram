@@ -98,6 +98,14 @@ class PocketOptionClient:
     def __init__(self):
         self._client = None
         self.last_error: Optional[str] = None
+        # Serializes ALL calls to self._client. Hypothesis: BinaryOptionsToolsV2's
+        # single shared client may not be safe under many concurrent calls (our
+        # bot fetches candles for 28 instruments via asyncio.gather, all hitting
+        # one client instance at once) — this could be what's tearing down its
+        # internal Rust-side channel ("half closed channel" errors), rather than
+        # genuine network drops. Serializing forces one call at a time, trading
+        # some speed for stability while we confirm/rule this out.
+        self._call_lock = asyncio.Lock()
 
     async def _recreate_client(self):
         """
@@ -124,7 +132,9 @@ class PocketOptionClient:
     async def _call_with_reconnect(self, label: str, fn):
         """
         Calls fn() (a zero-arg async callable wrapping a self._client.*
-        call). On failure, picks a recovery strategy based on the error:
+        call), serialized through self._call_lock so only one call touches
+        the shared client at a time (see __init__ docstring for why). On
+        failure, picks a recovery strategy based on the error:
         - "not connected" / "connection may have dropped" -> the socket
           likely just dropped; try the lighter-weight reconnect() first.
         - "half closed channel" / "channel sender error" -> the underlying
@@ -133,23 +143,24 @@ class PocketOptionClient:
           whole client from scratch instead.
         Retries fn() once after whichever recovery step was taken.
         """
-        try:
-            return await fn()
-        except Exception as e:
-            err_text = str(e).lower()
+        async with self._call_lock:
             try:
-                if "half closed channel" in err_text or "channel sender error" in err_text:
-                    logger.warning(f"{label}: structural channel error ({e!r}), recreating client...")
-                    await self._recreate_client()
-                elif "not connected" in err_text or "connection may have dropped" in err_text:
-                    logger.warning(f"{label}: connection dropped ({e!r}), attempting reconnect()...")
-                    await self._client.reconnect()
-                    await asyncio.sleep(2)
-                else:
-                    raise
                 return await fn()
-            except Exception as e2:
-                logger.error(f"{label}: retry after recovery attempt also failed: {e2!r}")
+            except Exception as e:
+                err_text = str(e).lower()
+                try:
+                    if "half closed channel" in err_text or "channel sender error" in err_text:
+                        logger.warning(f"{label}: structural channel error ({e!r}), recreating client...")
+                        await self._recreate_client()
+                    elif "not connected" in err_text or "connection may have dropped" in err_text:
+                        logger.warning(f"{label}: connection dropped ({e!r}), attempting reconnect()...")
+                        await self._client.reconnect()
+                        await asyncio.sleep(2)
+                    else:
+                        raise
+                    return await fn()
+                except Exception as e2:
+                    logger.error(f"{label}: retry after recovery attempt also failed: {e2!r}")
                 raise
 
     async def connect(self):

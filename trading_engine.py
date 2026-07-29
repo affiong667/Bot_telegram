@@ -107,9 +107,13 @@ async def run_cycle():
     if not usable_contexts:
         last_err = broker.get_last_error()
         detail = f" Last broker error: {last_err}" if last_err else ""
-        logger.error(f"No instruments had usable price data this cycle. Skipping.{detail}")
+        failed_count = len(contexts) - len(usable_contexts)
+        logger.error(f"{failed_count}/{len(contexts)} instruments had no usable price data this cycle. Skipping.{detail}")
         await telegram_bot.send_message(
-            telegram_bot.format_error("market_data", f"No usable price data for any instrument — skipped cycle.{detail}")
+            telegram_bot.format_error(
+                "market_data",
+                f"No usable price data for any instrument ({failed_count}/{len(contexts)} failed) — skipped cycle.{detail}"
+            )
         )
         return
 

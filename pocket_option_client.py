@@ -117,6 +117,18 @@ class PocketOptionClient:
         await asyncio.sleep(5)
         logger.info("Connected to Pocket Option")
 
+        # Diagnostic: log the REAL installed get_candles signature once at
+        # startup, since library documentation has proven unreliable for
+        # this package (parameter names differ between doc versions and
+        # what's actually installed). This gives ground truth in the logs
+        # instead of guessing from README examples again.
+        try:
+            import inspect
+            sig = inspect.signature(self._client.get_candles)
+            logger.info(f"Pocket Option get_candles() real signature: {sig}")
+        except Exception as e:
+            logger.debug(f"Could not introspect get_candles signature: {e}")
+
     async def close(self):
         if self._client is not None:
             try:
@@ -142,28 +154,51 @@ class PocketOptionClient:
         Pocket Option symbols typically use an _otc suffix for
         always-open (over-the-counter) assets, e.g. 'EURUSD_otc'.
 
-        The library's documented signature is get_candles(asset, period, duration)
-        where period = candle size in seconds, duration = total lookback window
-        in seconds (NOT a candle count) — e.g. duration=1200 with period=60 gets
-        ~20 one-minute candles. We convert our (count, granularity_sec) shape
-        into that (period, duration) shape here.
+        Library documentation for get_candles() has proven unreliable —
+        different doc sources show different parameter names (period/duration
+        vs period/count vs positional), and the actually-installed version
+        rejected 'duration' as an unexpected keyword. Rather than guess again
+        and require another deploy round-trip, this tries several plausible
+        call shapes in order and uses whichever one the installed version
+        actually accepts, logging which one worked so we can hardcode it
+        once confirmed.
         """
         period = granularity_sec
-        duration = count * granularity_sec
-        try:
-            raw_candles = await self._client.get_candles(symbol, period=period, duration=duration)
-            return [
-                Candle(
-                    epoch=int(c.get("time", 0)),
-                    open=float(c["open"]), high=float(c["high"]),
-                    low=float(c["low"]), close=float(c["close"]),
-                )
-                for c in raw_candles
-            ]
-        except Exception as e:
-            logger.warning(f"Pocket Option candle fetch failed for {symbol}: {e!r}")
-            self.last_error = f"{symbol}: {e!r}"
-            return []
+        attempts = [
+            ("period+count kwargs", lambda: self._client.get_candles(symbol, period=period, count=count)),
+            ("positional (symbol, period, count)", lambda: self._client.get_candles(symbol, period, count)),
+            ("period kwarg only", lambda: self._client.get_candles(symbol, period=period)),
+            ("time_frame+count kwargs", lambda: self._client.get_candles(symbol, time_frame=period, count=count)),
+            ("positional symbol only", lambda: self._client.get_candles(symbol)),
+        ]
+
+        last_exception = None
+        for label, attempt in attempts:
+            try:
+                raw_candles = await attempt()
+                logger.info(f"Pocket Option get_candles() succeeded using: {label} — hardcode this shape once confirmed stable")
+                return [
+                    Candle(
+                        epoch=int(c.get("time", 0)),
+                        open=float(c["open"]), high=float(c["high"]),
+                        low=float(c["low"]), close=float(c["close"]),
+                    )
+                    for c in raw_candles
+                ]
+            except TypeError as e:
+                last_exception = e
+                continue  # this call shape isn't accepted, try the next
+            except Exception as e:
+                # A non-TypeError means we found an accepted call shape but
+                # something else went wrong (network, symbol not found, etc.)
+                # — don't keep guessing shapes, surface this real error.
+                logger.warning(f"Pocket Option candle fetch failed for {symbol} (using {label}): {e!r}")
+                self.last_error = f"{symbol}: {e!r}"
+                return []
+
+        logger.warning(f"Pocket Option candle fetch failed for {symbol}: no known call shape accepted. Last error: {last_exception!r}")
+        self.last_error = f"{symbol}: no known get_candles() call shape accepted ({last_exception!r})"
+        return []
 
     async def is_symbol_open(self, symbol: str) -> bool:
         """

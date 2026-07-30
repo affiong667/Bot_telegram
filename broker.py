@@ -49,6 +49,27 @@ async def connect():
         await client.connect()
 
 
+async def ensure_connected():
+    """
+    Proactively verifies the broker connection is alive BEFORE a cycle
+    starts touching any instruments, rather than waiting for the first
+    real call to fail and reacting after the fact. This matters especially
+    for Pocket Option: its WebSocket has been observed dying during the
+    idle gap between hourly cycles, and by the time a call fails mid-cycle
+    it can be harder to reliably recover for all 28 instruments in one go.
+    Checking (and repairing) once, up front, is more robust than 28
+    separate reactive recovery attempts.
+
+    No-op for Deriv, which already has its own always-on reconnect logic
+    baked into its persistent listener task.
+    """
+    if config.BROKER == "pocket_option":
+        from pocket_option_client import client
+        await client.ensure_connected()
+    # Deriv: nothing extra needed here — its WebSocket listener task already
+    # runs continuously in the background and reconnects on its own.
+
+
 async def close():
     if config.BROKER == "pocket_option":
         from pocket_option_client import client

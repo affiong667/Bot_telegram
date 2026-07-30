@@ -107,6 +107,29 @@ class PocketOptionClient:
         # some speed for stability while we confirm/rule this out.
         self._call_lock = asyncio.Lock()
 
+    async def ensure_connected(self):
+        """
+        Proactively checks the connection is genuinely alive via a real,
+        lightweight call (balance()), BEFORE a cycle starts touching any
+        instruments. If it's dead, recreates the client from scratch. This
+        is called once at the start of every cycle by trading_engine.py,
+        rather than only reacting after a candle-fetch call fails.
+        """
+        if self._client is None:
+            logger.warning("ensure_connected: no client exists yet, connecting fresh...")
+            await self.connect()
+            return
+
+        try:
+            async with self._call_lock:
+                await self._client.balance()
+            logger.info("ensure_connected: connection verified alive")
+        except Exception as e:
+            err_text = str(e).lower()
+            logger.warning(f"ensure_connected: connection appears dead ({e!r}), recreating client...")
+            async with self._call_lock:
+                await self._recreate_client()
+
     async def _recreate_client(self):
         """
         For structural errors (e.g. 'half closed channel') where the

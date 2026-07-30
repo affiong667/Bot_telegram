@@ -95,6 +95,16 @@ async def run_cycle():
         await telegram_bot.send_message("⏸️ Cycle skipped — bot is paused. Send /resume to continue.")
         return
 
+    # Proactively verify (and repair if needed) the broker connection BEFORE
+    # touching any instruments — see broker.ensure_connected() docstring for
+    # why this matters especially for Pocket Option's idle-gap disconnects.
+    try:
+        await broker.ensure_connected()
+    except Exception as e:
+        logger.error(f"Could not establish broker connection at cycle start: {e}")
+        await telegram_bot.send_message(telegram_bot.format_error("broker", f"Connection check failed: {e}"))
+        return
+
     # 1. Real market data
     try:
         contexts = await build_all_contexts()

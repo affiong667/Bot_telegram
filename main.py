@@ -1,5 +1,6 @@
 """
-Entrypoint. Wires up logging, state DB, connects to Deriv, recovers any open
+Entrypoint. Wires up logging, state DB, connects to whichever broker is
+configured (config.BROKER = "deriv" | "pocket_option"), recovers any open
 positions from a previous run, then starts the hourly scheduler.
 
 Run with:  python main.py
@@ -25,6 +26,8 @@ logger = logging.getLogger("main")
 
 
 async def main():
+    logger.info(f"config.BROKER resolved to: '{config.BROKER}' (from environment variable BROKER)")
+
     problems = config.validate()
     hard_fail = [p for p in problems if "TWELVEDATA" not in p]  # missing TwelveData is a soft warning, not fatal
     if hard_fail:
@@ -43,6 +46,19 @@ async def main():
 
     await recover_open_trades()
 
+    instrument_count = len(broker.get_instruments())
+    broker_label = "Pocket Option" if config.BROKER == "pocket_option" else "Deriv"
+    is_demo = config.POCKET_OPTION_IS_DEMO if config.BROKER == "pocket_option" else config.DERIV_IS_DEMO
+    await telegram_bot.send_message(
+        "🤖 <b>Binary options consensus bot started</b>\n"
+        f"Universe: {instrument_count} instruments\n"
+        f"Signals/cycle: {runtime_settings.num_signals} | Stake: ${runtime_settings.stake_per_trade:.2f}\n"
+        f"Min confidence: {runtime_settings.min_confidence}% | Contract duration: {runtime_settings.trade_duration_minutes}min\n"
+        f"Cycle interval: every {runtime_settings.trade_duration_minutes}min (matches trade duration)\n"
+        f"Broker: {broker_label} ({'DEMO' if is_demo else 'REAL ⚠️'})\n"
+        f"Send /help to see available commands."
+    )
+
     # Start listening for /status, /pause, /resume, /history in the background
     logger.info("Creating Telegram command polling task...")
     polling_task = asyncio.create_task(bot_commands.poll_commands())
@@ -56,19 +72,6 @@ async def main():
             logger.error(f"Polling task died with an exception: {exc!r}", exc_info=exc)
 
     polling_task.add_done_callback(_on_polling_task_done)
-
-    instrument_count = len(broker.get_instruments())
-    broker_label = "Pocket Option" if config.BROKER == "pocket_option" else "Deriv"
-    is_demo = config.POCKET_OPTION_IS_DEMO if config.BROKER == "pocket_option" else config.DERIV_IS_DEMO
-    await telegram_bot.send_message(
-        "馃 <b>Binary options consensus bot started</b>\n"
-        f"Universe: {instrument_count} instruments\n"
-        f"Signals/cycle: {runtime_settings.num_signals} | Stake: ${runtime_settings.stake_per_trade:.2f}\n"
-        f"Min confidence: {runtime_settings.min_confidence}% | Contract duration: {runtime_settings.trade_duration_minutes}min\n"
-        f"Cycle interval: every {runtime_settings.trade_duration_minutes}min (matches trade duration)\n"
-        f"Broker: {broker_label} ({'DEMO' if is_demo else 'REAL 鈿狅笍'})\n"
-        f"Send /help to see available commands."
-    )
 
     start_scheduler()
 
